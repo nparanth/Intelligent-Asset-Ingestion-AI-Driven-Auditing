@@ -37,7 +37,7 @@ By leveraging **Amazon Bedrock (Claude 3)** and **EventBridge Pipes**, this syst
 | **Orchestration** | AWS Step Functions & EventBridge Pipes |
 | **Messaging** | Amazon SQS & EventBridge |
 | **Database** | Amazon DynamoDB (On-Demand) |
-| **Security** | AWS KMS (Customer Managed Keys) |
+| **Security** | AWS KMS |
 
 ---
 
