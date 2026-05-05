@@ -60,7 +60,8 @@ By leveraging **Amazon Bedrock (Claude 3)** and **EventBridge Pipes**, this syst
    git clone <your-repository-url>
 
 2. **Deploy via CloudFormation:**
-   aws cloudformation deploy \
+    ```
+    aws cloudformation deploy \
      --template-file template.yaml \
      --stack-name ShipyardEngineeringVault \
      --capabilities CAPABILITY_NAMED_IAM
