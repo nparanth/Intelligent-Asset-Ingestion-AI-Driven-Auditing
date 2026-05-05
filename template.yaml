@@ -1,0 +1,248 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'The AI-Powered Engineering Vault - Production Ready Functionless Pipeline'
+
+Resources:
+  # --------------------------------------------------------------------------
+  # 1. KMS Key for Encryption (S3, SQS, SNS)
+  # --------------------------------------------------------------------------
+  PipelineKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: Symmetric key for Pipeline Encryption
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM Admin Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: kms:*
+            Resource: "*"
+          - Sid: Allow Services to use the key
+            Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+                - s3.amazonaws.com
+                - sns.amazonaws.com
+                - states.amazonaws.com
+            Action:
+              - kms:GenerateDataKey*
+              - kms:Decrypt
+            Resource: "*"
+
+  # --------------------------------------------------------------------------
+  # 2. S3 Bucket (Raw Zone)
+  # --------------------------------------------------------------------------
+  RawDataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "shipyard-raw-ingestion-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt PipelineKMSKey.Arn
+            BucketKeyEnabled: true
+      ObjectLockEnabled: true
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: GOVERNANCE
+            Days: 30
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+
+  # --------------------------------------------------------------------------
+  # 3. DynamoDB Table (Asset Registry)
+  # --------------------------------------------------------------------------
+  AssetRegistryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ShipyardAssetRegistry
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: FileID
+          AttributeType: S
+        - AttributeName: Timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: FileID
+          KeyType: HASH
+        - AttributeName: Timestamp
+          KeyType: RANGE
+
+  # --------------------------------------------------------------------------
+  # 4. SQS Queue & SNS Topic (Buffering & Alerting)
+  # --------------------------------------------------------------------------
+  IngestionBufferQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: AssetIngestionQueue
+      VisibilityTimeout: 300
+      KmsMasterKeyId: !GetAtt PipelineKMSKey.Arn
+
+  AuditAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: ShipyardAuditAlerts
+      KmsMasterKeyId: !GetAtt PipelineKMSKey.Arn
+
+  # --------------------------------------------------------------------------
+  # 5. Lambda: Pre-Signed URL Generator
+  # --------------------------------------------------------------------------
+  URLGeneratorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3PresignPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub "${RawDataBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+
+  PreSignedURLFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: GenerateShipyardUploadURL
+      Handler: index.lambda_handler
+      Runtime: python3.9
+      Role: !GetAtt URLGeneratorRole.Arn
+      Environment:
+        Variables:
+          UPLOAD_BUCKET: !Ref RawDataBucket
+      Code:
+        ZipFile: |
+          import json, boto3, os, logging
+          s3 = boto3.client('s3')
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          BUCKET_NAME = os.environ.get('UPLOAD_BUCKET')
+          def lambda_handler(event, context):
+              try:
+                  body = json.loads(event.get('body', '{}'))
+                  file_name = body.get('fileName', 'unknown_asset.stl')
+                  content_type = body.get('contentType', 'application/octet-stream')
+                  url = s3.generate_presigned_url('put_object', 
+                      Params={'Bucket': BUCKET_NAME, 'Key': file_name, 'ContentType': content_type}, 
+                      ExpiresIn=300)
+                  return {'statusCode': 200, 'headers': {'Access-Control-Allow-Origin': '*'}, 'body': json.dumps({'uploadUrl': url})}
+              except Exception as e:
+                  logger.error(str(e))
+                  return {'statusCode': 500, 'body': json.dumps({'error': 'Failed to generate URL'})}
+
+  # --------------------------------------------------------------------------
+  # 6. Step Functions (The AI Brain)
+  # --------------------------------------------------------------------------
+  StateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StateMachineExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !GetAtt AssetRegistryTable.Arn
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: "arn:aws:bedrock:*::foundation-model/anthropic.claude-3-sonnet-*"
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref AuditAlertTopic
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: !GetAtt PipelineKMSKey.Arn
+
+  AIOrchestratorStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: AIAssetAuditor
+      RoleArn: !GetAtt StateMachineRole.Arn
+      DefinitionString: !Sub |-
+        {
+          "StartAt": "InvokeBedrockAI",
+          "States": {
+            "InvokeBedrockAI": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::bedrock:invokeModel",
+              "Parameters": {
+                "ModelId": "anthropic.claude-3-sonnet-20240229-v1:0",
+                "Body": {
+                  "anthropic_version": "bedrock-2023-05-31",
+                  "max_tokens": 500,
+                  "messages": [{"role": "user", "content": "Evaluate shipyard data upload."}]
+                }
+              },
+              "ResultPath": "$.ai_analysis",
+              "Next": "SaveToDynamoDB"
+            },
+            "SaveToDynamoDB": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::dynamodb:putItem",
+              "Parameters": {
+                "TableName": "${AssetRegistryTable}",
+                "Item": {
+                  "FileID": { "S.$": "$.detail.object.key" },
+                  "Timestamp": { "S.$": "$$.State.EnteredTime" },
+                  "AuditResult": { "S.$": "$.ai_analysis.Body.content[0].text" }
+                }
+              },
+              "Next": "NotifyEngineers"
+            },
+            "NotifyEngineers": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${AuditAlertTopic}",
+                "Message": {
+                  "Alert": "New Shipyard Audit Complete",
+                  "File": "$.detail.object.key",
+                  "Result": "$.ai_analysis.Body.content[0].text"
+                }
+              },
+              "End": true
+            }
+          }
+        }
+
+Outputs:
+  S3BucketName:
+    Value: !Ref RawDataBucket
+  LambdaFunctionArn:
+    Value: !GetAtt PreSignedURLFunction.Arn
+  SNSTopicArn:
+    Value: !Ref AuditAlertTopic
