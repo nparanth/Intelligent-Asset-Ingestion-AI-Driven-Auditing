@@ -1,4 +1,4 @@
-### **Intelligent Asset Ingestion & Functionless AI-Driven Auditing**
+# **Intelligent Asset Ingestion & Functionless AI-Driven Auditing**
 
 ## Project Overview
 The project is a mission-critical ingestion pipeline designed for data ingestion. It automates the auditing of technical assets (3D CAD models) using a **Functionless Serverless Architecture**. 
