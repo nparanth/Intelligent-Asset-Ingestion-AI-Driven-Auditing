@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>3D Model Ingestion</title>
+    <style>
+        body { font-family: sans-serif; padding: 40px; text-align: center; background: #f4f4f4; }
+        .container { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); display: inline-block; }
+        #status { margin-top: 20px; color: #555; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>3D Model Upload</h2>
+    <input type="file" id="picker" accept=".obj,.stl">
+    <button onclick="doUpload()">Upload</button>
+    <div id="status">Ready.</div>
+</div>
+
+<script>
+    async function doUpload() {
+        const status = document.getElementById('status');
+        const file = document.getElementById('picker').files[0];
+        
+        if (!file) return alert("Select a file");
+
+        status.innerText = "Getting permission...";
+
+        try {
+            // 1. Ask your Lambda for a Pre-signed URL
+            // Replace with your actual API Gateway Invoke URL
+            const apiResp = await fetch('https://lufqz3ehrh.execute-api.us-east-1.amazonaws.com/', {
+                method: 'POST',
+                body: JSON.stringify({ fileName: file.name, contentType: file.type })
+            });
+            const { uploadUrl } = await apiResp.json();
+
+            status.innerText = "Uploading to S3...";
+
+            // 2. Upload file directly to S3
+            const s3Resp = await fetch(uploadUrl, {
+                method: 'PUT',
+                body: file,
+                headers: { 'Content-Type': file.type }
+            });
+
+            status.innerText = s3Resp.ok ? "Success!" : "Upload failed.";
+        } catch (err) {
+            status.innerText = "" Error: " + err.message;
+        }
+    }
+</script>
+
+</body>
+</html>
