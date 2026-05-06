@@ -25,7 +25,7 @@ By leveraging **Amazon Bedrock (Claude 3)** and **EventBridge Pipes**, this syst
 
 ### **Phase 4: Real-Time Governance**
 *   **DynamoDB Registry:** Stores the final analysis, including timestamps and AI-driven results for immediate engineering review.
-*   **SNS:** Dispatches an "Action REquired" alert to lead engineers with a summary of the AI-generated audit results the moment a record is finalized.
+*   **SNS:** Dispatches an "Action Required" alert to lead engineers with a summary of the AI-generated audit results the moment a record is finalized.
    
 ---
 
