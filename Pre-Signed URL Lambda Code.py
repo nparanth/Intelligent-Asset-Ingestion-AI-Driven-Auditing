@@ -4,7 +4,7 @@ import os
 
 
 s3 = boto3.client('s3')
-bucket_name = os.environ.get('UPLOAD_BUCKET', 'example')
+bucket = os.environ['BUCKET_NAME']
 
 def lambda_handler(event, context):
  
@@ -26,9 +26,5 @@ def lambda_handler(event, context):
 
     return {
         'statusCode': 200,
-        'headers': {
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Headers': 'Content-Type'
-        },
         'body': json.dumps({'uploadUrl': url})
     }
