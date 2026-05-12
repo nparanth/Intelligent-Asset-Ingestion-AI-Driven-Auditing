@@ -1,11 +1,11 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'The AI-Powered Engineering Vault - Intelligent-Asset-Ingestion-AI-Driven-Auditing'
+Description: 'The AI-Powered Engineering Vault - Intelligent Asset Ingestion & Functionless AI-Driven Auditing'
 
 Parameters:
   AlertEmail:
     Type: String
     Description: "Email address to receive SNS Audit Failure Alerts"
-    Default: "example@us.navy.mil"
+    Default: "example@email.com"
 
 Resources:
   # ==========================================================================
@@ -45,7 +45,7 @@ Resources:
   VaultWAF:
     Type: AWS::WAFv2::WebACL
     Properties:
-      Name: ShipyardVaultWAF
+      Name: VaultWAF
       Scope: CLOUDFRONT
       DefaultAction:
         Allow: {}
@@ -57,10 +57,10 @@ Resources:
   # ==========================================================================
   # 2. STORAGE & DATABASE (S3 & DynamoDB)
   # ==========================================================================
-  RawDataBucket:
+  DataBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub "shipyard-raw-ingestion-${AWS::AccountId}-${AWS::Region}"
+      BucketName: !Sub "raw-ingestion-${AWS::AccountId}-${AWS::Region}"
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -74,6 +74,20 @@ Resources:
               SSEAlgorithm: aws:kms
               KMSMasterKeyID: !GetAtt PipelineKMSKey.Arn
             BucketKeyEnabled: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins: 
+              - "*" # In production, replace with your exact Dashboard URL
+            AllowedMethods: 
+              - GET
+              - PUT
+              - POST
+              - OPTIONS
+            AllowedHeaders: 
+              - "*"
+            ExposedHeaders:
+              - ETag
+            MaxAge: 3000
       ObjectLockEnabled: true
       ObjectLockConfiguration:
         ObjectLockEnabled: Enabled
@@ -88,7 +102,7 @@ Resources:
   AssetRegistryTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: ShipyardAssetRegistry
+      TableName: AssetRegistry
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: FileID
@@ -125,7 +139,7 @@ Resources:
         WebACLId: !GetAtt VaultWAF.Arn
         DefaultRootObject: index.html
         Origins:
-          - DomainName: !GetAtt RawDataBucket.RegionalDomainName
+          - DomainName: !GetAtt DataBucket.RegionalDomainName
             Id: S3Origin
             OriginAccessControlId: !Ref CloudFrontOAC
             S3OriginConfig:
@@ -133,7 +147,7 @@ Resources:
         DefaultCacheBehavior:
           TargetOriginId: S3Origin
           ViewerProtocolPolicy: redirect-to-https
-          AllowedMethods: [DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT] # Required for Uploads
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT] # Required for Uploads
           CachedMethods: [GET, HEAD]
           ForwardedValues:
             QueryString: true # Required to pass Pre-signed URL params to S3
@@ -142,7 +156,7 @@ Resources:
   BucketOACPolicy:
     Type: AWS::S3::BucketPolicy
     Properties:
-      Bucket: !Ref RawDataBucket
+      Bucket: !Ref DataBucket
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -160,8 +174,13 @@ Resources:
   VaultAPI:
     Type: AWS::ApiGatewayV2::Api
     Properties:
-      Name: ShipyardEngineeringAPI
+      Name: EngineeringAPI
       ProtocolType: HTTP
+      CorsConfiguration: # <--- Handles the API Cross-Origin check
+        AllowOrigins: ["*"] 
+        AllowMethods: ["GET", "POST", "OPTIONS"]
+        AllowHeaders: ["*"]
+
 
   APIDefaultStage:
     Type: AWS::ApiGatewayV2::Stage
@@ -203,7 +222,7 @@ Resources:
       Runtime: python3.9
       Environment:
         Variables:
-          BUCKET_NAME: !Ref RawDataBucket
+          BUCKET_NAME: !Ref DataBucket
       Code:
         ZipFile: |
           import json
@@ -211,24 +230,19 @@ Resources:
           import os
 
           s3 = boto3.client('s3')
+          bucket = os.environ['BUCKET_NAME']
 
           def handler(event, context):
-              bucket = os.environ['BUCKET_NAME']
-              file_name = "secure-asset.pdf"
-              
-              # Parse filename from API Gateway body if provided
-              try:
+                      
                   body = json.loads(event.get('body', '{}'))
-                  file_name = body.get('file_name', file_name)
-              except:
-                  pass
+                  file_name = body.get('file_name', '{}')
+                  content_type = body.get('contentType', '{}')
                   
-              url = s3.generate_presigned_url(
+                  url = s3.generate_presigned_url(
                   ClientMethod='put_object',
-                  Params={'Bucket': bucket, 'Key': f"uploads/{file_name}"},
+                  Params={'Bucket': bucket, 'Key': file_name,  'ContentType': content_type},
                   ExpiresIn=3600
-              )
-              
+)
               return {
                   'statusCode': 200,
                   'body': json.dumps({'upload_url': url})
@@ -280,6 +294,10 @@ Resources:
               Service: events.amazonaws.com
             Action: sqs:SendMessage
             Resource: !GetAtt IngestionBufferQueue.Arn
+            Condition:
+             ArnEquals:
+			"aws:SourceArn": !GetAtt S3ToSQSRule.Arn # <--- The Zero Trust Lock
+
 
   S3ToSQSRule:
     Type: AWS::Events::Rule
@@ -302,7 +320,7 @@ Resources:
   AuditAlertTopic:
     Type: AWS::SNS::Topic
     Properties:
-      TopicName: ShipyardAuditAlerts
+      TopicName: AuditAlerts
       KmsMasterKeyId: !GetAtt PipelineKMSKey.Arn
 
   AuditEmailSubscription:
@@ -350,11 +368,36 @@ Resources:
           "StartAt": "AuditAssetWithBedrock",
           "States": {
             "AuditAssetWithBedrock": {
+              "Type": "Task",
+              "Resource":"arn:aws:states:::bedrock:invokeModel",
+              "Parameters": {
+                "ModelId": "anthropic.claude-3-sonnet-20240229-v1:0",
+                "Body": {
+                  "anthropic_version": "bedrock-2023-05-31",
+                  "max_tokens": 1000,
+                  "messages": [
+                    {
+                      "role": "user",
+                      "content": [
+                        {
+                          "type": "text",
+                          ""text.$": "States.Format('You are a DoD Security Auditor. Analyze the metadata for this asset. If the file is a .pdf or .cad, output exactly the word PASSED. If it is any other format, output exactly the word FAILED. Do not include any other text or explanation. File Name: {}', $.body.detail.object.key)"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              },
+              "ResultPath": "$.BedrockOutput",
+              "Next": "ExtractAuditStatus"
+            },
+            "ExtractAuditStatus": {
               "Type": "Pass",
-              "Result": "FAILED",
+              "Parameters": {
+                "AuditStatus.$": "$.BedrockOutput.Body.content[0].text"
+              },
               "ResultPath": "$.AuditStatus",
-              "Next": "SaveToDynamoDB",
-              "Comment": "Placeholder for Bedrock SDK Integration"
+              "Next": "SaveToDynamoDB"
             },
             "SaveToDynamoDB": {
               "Type": "Task",
